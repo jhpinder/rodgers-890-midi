@@ -28,6 +28,12 @@
 
 #define STOPS_CRESC_OFFSET 8
 
+#define SWELL_CHANNEL 0
+#define GREAT_CHANNEL 1
+#define PEDAL_CHANNEL 2
+#define STOP_TAB_CHANNEL 3
+#define CHOIR_CHANNEL 4
+
 byte currentInputChain[5][96];
 byte previousInputChain[5][96];
 // 0 = swell, 1 = great, 2 = pedal, 3 = stops, 4 = choir
@@ -35,6 +41,16 @@ byte previousInputChain[5][96];
 byte lampChainState[152];
 
 int previousMicros;
+
+struct midiAddr {
+  byte channel;
+  byte note;
+};
+
+struct chainAddr {
+  byte number;
+  byte value;
+};
 
 void setup() {
   pinMode(ICLK, OUTPUT);
@@ -75,15 +91,17 @@ void loop() {
 }
 
 void updateLamps() {
-  for (int i = 0; i < 152; i++) {
+  for (int i = 151; i >= 0; i--) {
     // output chain
     digitalWrite(O6, lampChainState[i]);
     // clock
+    delayMicroseconds(OCLK_DELAY);
     digitalWrite(OCLK, HIGH);
-    delayMicroseconds(ICLK_DELAY);
+    delayMicroseconds(OCLK_DELAY);
     digitalWrite(OCLK, LOW);
   }
   // strobe
+  delayMicroseconds(OCLK_DELAY);
   digitalWrite(OSTB, HIGH);
   delayMicroseconds(OSTB_DELAY);
   digitalWrite(OSTB, LOW);
@@ -94,12 +112,13 @@ void handleInputChanges() {
     for (int chain = 0; chain < 5; chain++) {
       if (currentInputChain[chain][input_number] != previousInputChain[chain][input_number]) {
         // input is different than last scan
+        midiAddr midiToSend = chainToMidi({ chain, input_number });
         if (currentInputChain[chain][input_number]) {
           // input turned on, send midi note on
-          noteOn(chain, input_number, NOTE_ON_VELOCITY);
+          noteOn(midiToSend.channel, midiToSend.note, NOTE_ON_VELOCITY);
         } else {
           // input turned off, send midi note off
-          noteOff(chain, input_number, NOTE_OFF_VELOCITY);
+          noteOff(midiToSend.channel, midiToSend.note, NOTE_OFF_VELOCITY);
         }
       }
       previousInputChain[chain][input_number] = currentInputChain[chain][input_number];
@@ -112,8 +131,9 @@ void shiftInputs() {
   digitalWrite(ISTB, HIGH);
   delayMicroseconds(ISTB_DELAY);
   digitalWrite(ISTB, LOW);
+  delayMicroseconds(ICLK_DELAY);
 
-  for (int i = 0; i < INPUT_CHAIN_SIZE; i++) {
+  for (int i = INPUT_CHAIN_SIZE - 1; i >= 0; i--) {
     // I0
     currentInputChain[0][i] = digitalRead(I0);
     // I1
@@ -129,34 +149,95 @@ void shiftInputs() {
     digitalWrite(ICLK, HIGH);
     delayMicroseconds(ICLK_DELAY);
     digitalWrite(ICLK, LOW);
+    delayMicroseconds(ICLK_DELAY);
   }
 }
 
 void receiveLampMIDI(midiEventPacket_t rx) {
-  // check if the channel is 0x03
-  if (rx.byte1 & 0x0F != 0x03) {
-    return;
-  }
+  chainAddr chainToChange = midiToChain({ rx.byte1 & 0x0F, rx.byte2 });
+  lampChainState[chainToChange.value] = rx.byte1 & 0xF0 == NOTE_ON;
 
-  byte note = rx.byte2;
-  lampChainState[note] = rx.byte1 & 0xF0 == NOTE_ON;
-  if (rx.byte1 >= 8) {
-    previousInputChain[3][note - 8] = rx.byte1 & 0xF0 == NOTE_ON;
+  if (chainToChange.value < 104) {
+    previousInputChain[chainToChange.number][chainToChange.value] = rx.byte1 & 0xF0 == NOTE_ON;
   }
 }
 
 void noteOn(byte channel, byte pitch, byte velocity) {
-  if (channel == 3) {
-    pitch += STOPS_CRESC_OFFSET;
-  }
   midiEventPacket_t noteOn = { 0x09, 0x90 | channel, pitch, velocity };
   MidiUSB.sendMIDI(noteOn);
 }
 
 void noteOff(byte channel, byte pitch, byte velocity) {
-  if (channel == 3) {
-    pitch += STOPS_CRESC_OFFSET;
-  }
   midiEventPacket_t noteOff = { 0x08, 0x80 | channel, pitch, velocity };
   MidiUSB.sendMIDI(noteOff);
+}
+
+midiAddr chainToMidi(chainAddr chain) {
+  midiAddr result = { -1, -1 };
+
+  if (chain.number == SWELL_CHANNEL || chain.number == GREAT_CHANNEL || chain.number == CHOIR_CHANNEL) {
+    result.channel = chain.number;
+    result.note += 3;
+  } else if (chain.number == PEDAL_CHANNEL) {
+    result.channel = chain.number;
+    result.note -= 29;
+  } else if (chain.number == STOP_TAB_CHANNEL) {
+    if (chain.value > 7 && chain.value < 104) {
+      result.note = chain.value;
+      result.channel = chain.number;
+    }
+  }
+
+  return result;
+}
+
+chainAddr midiToChain(midiAddr midiEvent) {
+  chainAddr result = { -1, -1 };
+
+  if (midiEvent.channel == SWELL_CHANNEL || midiEvent.channel == GREAT_CHANNEL || midiEvent.channel == CHOIR_CHANNEL) {
+    if (midiEvent.note >= 35 && midiEvent.note <= 95) {
+      return result;
+    }
+
+    result.number = 3;
+
+    switch (midiEvent.channel) {
+      case SWELL_CHANNEL:
+        if (midiEvent.note >= 19 && midiEvent.note <= 26) {
+          result.value = midiEvent.note + 86;
+        } else if (midiEvent.note >= 28 && midiEvent.note <= 30) {
+          result.value = midiEvent.note + 85;
+        } else if (midiEvent.note == 98) {
+          result.value = 141;
+        }
+        break;
+      case GREAT_CHANNEL:
+        if (midiEvent.note >= 11 && midiEvent.note <= 15) {
+          result.value = midiEvent.note + 106;
+        } else if (midiEvent.note >= 19 && midiEvent.note <= 24) {
+          result.value = midiEvent.note + 102;
+        } else if (midiEvent.note >= 27 && midiEvent.note <= 31) {
+          result.value = midiEvent.note + 101;
+        }
+        break;
+      case CHOIR_CHANNEL:
+        if (midiEvent.note >= 13 && midiEvent.note <= 14) {
+          result.value = midiEvent.note + 120;
+        } else if (midiEvent.note >= 18 && midiEvent.note <= 23) {
+          result.value = midiEvent.note + 117;
+        } else if (midiEvent.note >= 24 && midiEvent.note <= 27) {
+          result.value = midiEvent.note + 120;
+        } else if (midiEvent.note >= 29 && midiEvent.note <= 32) {
+          result.value = midiEvent.note + 119;
+        }
+        break;
+      case STOP_TAB_CHANNEL:
+        result.value = midiEvent.note + 8;
+        break;
+      default:
+        break;
+    }
+  }
+
+  return result;
 }

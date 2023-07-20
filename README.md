@@ -1,6 +1,6 @@
 # Rodgers 890 Westminster MIDI Project
 
-## Overview- 
+## Overview 
 
 When installed and used correctly, this project:
 
@@ -52,7 +52,7 @@ USB-MIDI interfaces sometimes feature multiple MIDI ports which are completely i
 This would allow one processor to dedicate its MIDI port to sending keyboard/piston note commands with no connection to the stops/lamps.
 The other processor would be able to spend as much time as needed to receive MIDI notes and update lamps.
 
-### *Solution 2: MIDI receive processing limits*
+### *Solution 2 (**Current**): MIDI receive processing limits*
 
 During each loop, we check if `MIDI.read()` is true (if there is an incoming message).
 We continue to process MIDI messages in each loop until the incoming queue is empty.
@@ -60,6 +60,7 @@ However, if we receive more than 10 note commands at once, that breaks the limit
 Before each time we check for an incoming message, we check to see if more than 10ms has elapsed since the last keyboard scan.
 We do not update the lamps until the entire message queue has been emptied so as not to possibly create a ripple effect.
 This complicates the code a little bit but allows the entire organ to run off of one MIDI port.
+The logic for determining if more than the allowed amount of time has passed since the last keyboard read can be bypassed by connecting pin 3 to ground. For this to take effect, the arduino must be reset.
 
 ---
 ### Drawknobs and Tilt Tabs
@@ -74,3 +75,19 @@ This means that there is a possibility of echoing a MIDI note on or note off com
 To solve this issue, when receiving MIDI note commands, we `or` the "previous state" word with any reveiced MIDI note command. When scanning for changes on the next loop, those changes that are now read in do not trigger new MIDI note commands to be sent back to the organ software.
 
 ![Stop driver](stopDriver.png)
+
+---
+### I/O Chain <-> MIDI
+
+There are 5 input chains and one output chain that interface with MIDI. Four of the input chains contain a keyboard but they do not start at the 36th position, rather the 33rd for manuals and 65th for pedals.
+If we output the raw chain position to MIDI, there will be a transposition required by the organ software.
+Instead, we have opted to shift the positions of the input chain before we send out the MIDI note events.
+This also means that the pistons associated with each keyboard are shifted as well.
+To further complicate the matter, the lamps associated with each piston are not lined up 1:1 in an output chain with each input piston.
+Instead, the piston lamps are added on to the end of the drawknob lamp output chain.
+
+We have developed two functions that interface between the I/O chains and MIDI events.
+The function `chainToMidi()` accepts the input chain number and bit address, and returns the corresponding MIDI channel and note number.
+The function `midiToChain()` accepts a MIDI channel and note, and returns the corresponding output chain number and bit address.
+
+This allows us to convert from the I/O chain to MIDI note/channel and back very quickly without having to implement a lookup table.

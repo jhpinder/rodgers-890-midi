@@ -1,5 +1,7 @@
 #include <MIDIUSB.h>
 
+#define RECEIVE_MIDI_LIMIT_PIN 3
+
 #define ICLK 4
 #define ISTB 5
 #define I0 6   // swell
@@ -26,8 +28,6 @@
 #define NOTE_ON 0x90
 #define NOTE_OFF 0x80
 
-#define STOPS_CRESC_OFFSET 8
-
 #define SWELL_CHANNEL 0
 #define GREAT_CHANNEL 1
 #define PEDAL_CHANNEL 2
@@ -39,6 +39,8 @@ byte previousInputChain[5][96];
 // 0 = swell, 1 = great, 2 = pedal, 3 = stops, 4 = choir
 
 byte lampChainState[152];
+
+bool receiveMidiLimitBypass;
 
 int previousMicros;
 
@@ -63,19 +65,17 @@ void setup() {
   pinMode(OCLK, OUTPUT);
   pinMode(OSTB, OUTPUT);
   pinMode(O6, OUTPUT);
+  pinMode(RECEIVE_MIDI_LIMIT_PIN, INPUT_PULLUP);
+  receiveMidiLimitBypass = !digitalRead(RECEIVE_MIDI_LIMIT_PIN);
 }
 
 void loop() {
   midiEventPacket_t rx;
   do {
-    if (micros() - previousMicros < 10000) {
+    if (micros() - previousMicros < 10000 || receiveMidiLimitBypass) {
       rx = MidiUSB.read();
       if (rx.header != 0) {
         receiveLampMIDI(rx);
-        // send back the received MIDI command
-        // placeholder
-        // MidiUSB.sendMIDI(rx);
-        // MidiUSB.flush();
       } else {
         updateLamps();
       }

@@ -76,22 +76,31 @@ void setup()
 
 void loop()
 {
-  if (digitalRead(POWER_DETECT))
+  if (true)
   {
     midiEventPacket_t rx;
     do
     {
       if (micros() - previousMicros < 10000 || receiveMidiLimitBypass)
       {
+        do {
+          midiEventPacket_t rx;
         rx = MidiUSB.read();
-        if (rx.header != 0)
-        {
-          receiveLampMIDI(rx);
-        }
-        else
-        {
-          updateLamps();
-        }
+        if (rx.header != 0) {
+          //send back the received MIDI command
+        MidiUSB.sendMIDI(rx);
+        MidiUSB.flush();
+      }
+  } while (rx.header != 0);
+//        rx = MidiUSB.read();
+//        if (rx.header != 0)
+//        {
+//          receiveLampMIDI(rx);
+//        }
+//        else
+//        {
+//          
+//        }
       }
       else
       {
@@ -99,16 +108,17 @@ void loop()
       }
     } while (rx.header != 0);
 
+    updateLamps();
     shiftInputs();
     handleInputChanges();
     MidiUSB.flush();
     previousMicros = micros();
   }
-  else
-  {
-    while (MidiUSB.read())
-    {
-    }
+  else {
+    midiEventPacket_t rx;
+    do {
+      rx = MidiUSB.read();
+    } while (rx.header != 0);
     MidiUSB.flush();
     delay(1000);
   }
@@ -218,12 +228,12 @@ midiAddr chainToMidi(chainAddr chain)
   if (chain.number == SWELL_CHANNEL || chain.number == GREAT_CHANNEL || chain.number == CHOIR_CHANNEL)
   {
     result.channel = chain.number;
-    result.note = chain.value + 3;
+    result.note = chain.value + 4;
   }
   else if (chain.number == PEDAL_CHANNEL)
   {
     result.channel = chain.number;
-    result.note = chain.value - 29;
+    result.note = chain.value - 28;
   }
   else if (chain.number == STOP_TAB_CHANNEL)
   {

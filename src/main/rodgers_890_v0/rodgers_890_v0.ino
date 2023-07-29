@@ -71,7 +71,7 @@ void setup()
   pinMode(O6, OUTPUT);
   pinMode(RECEIVE_MIDI_LIMIT_PIN, INPUT_PULLUP);
   pinMode(POWER_DETECT, INPUT);
-  receiveMidiLimitBypass = !digitalRead(RECEIVE_MIDI_LIMIT_PIN);
+  receiveMidiLimitBypass = true;
 }
 
 void loop()
@@ -83,24 +83,24 @@ void loop()
     {
       if (micros() - previousMicros < 10000 || receiveMidiLimitBypass)
       {
-        do {
-          midiEventPacket_t rx;
-        rx = MidiUSB.read();
-        if (rx.header != 0) {
-          //send back the received MIDI command
-        MidiUSB.sendMIDI(rx);
-        MidiUSB.flush();
-      }
-  } while (rx.header != 0);
+//        do {
+//          midiEventPacket_t rx;
 //        rx = MidiUSB.read();
-//        if (rx.header != 0)
-//        {
-//          receiveLampMIDI(rx);
-//        }
-//        else
-//        {
-//          
-//        }
+//        if (rx.header != 0) {
+//          //send back the received MIDI command
+//        MidiUSB.sendMIDI(rx);
+//        MidiUSB.flush();
+//      }
+//  } while (rx.header != 0);
+        rx = MidiUSB.read();
+        if (rx.header != 0)
+        {
+          receiveLampMIDI(rx);
+        }
+        else
+        {
+          
+        }
       }
       else
       {
@@ -201,12 +201,28 @@ void shiftInputs()
 void receiveLampMIDI(midiEventPacket_t rx)
 {
   chainAddr chainToChange = midiToChain({rx.byte1 & 0x0F, rx.byte2});
-  lampChainState[chainToChange.value] = rx.byte1 & 0xF0 == NOTE_ON;
+  lampChainState[chainToChange.value] = (rx.byte1 >> 4) & 0x0F == NOTE_ON;
 
-  if (chainToChange.value < 104)
+  if (chainToChange.number == STOP_TAB_CHANNEL)
   {
-    previousInputChain[chainToChange.number][chainToChange.value] = rx.byte1 & 0xF0 == NOTE_ON;
+    previousInputChain[STOP_TAB_CHANNEL][chainToChange.value] = rx.byte1 & 0xF0 == NOTE_ON;
   }
+    lampChainState[40] = rx.byte1 & 0x01;
+    lampChainState[41] = rx.byte1 & 0x02;
+    lampChainState[42] = rx.byte1 & 0x04;
+    lampChainState[43] = rx.byte1 & 0x08;
+    lampChainState[46] = rx.byte1 & 0x10;
+    lampChainState[47] = rx.byte1 & 0x20;
+    lampChainState[48] = rx.byte1 & 0x40;
+    lampChainState[49] = rx.byte1 & 0x80;
+    lampChainState[53] = rx.byte2 & 0x01;
+    lampChainState[54] = rx.byte2 & 0x02;
+    lampChainState[55] = rx.byte2 & 0x04;
+    lampChainState[56] = rx.byte2 & 0x08;
+    lampChainState[66] = rx.byte2 & 0x10;
+    lampChainState[67] = rx.byte2 & 0x20;
+    lampChainState[68] = rx.byte2 & 0x40;
+    lampChainState[69] = rx.byte2 & 0x80;
 }
 
 void noteOn(byte channel, byte pitch, byte velocity)
@@ -305,13 +321,19 @@ chainAddr midiToChain(midiAddr midiEvent)
         result.value = midiEvent.note + 119;
       }
       break;
-    case STOP_TAB_CHANNEL:
-      result.value = midiEvent.note + 8;
-      break;
     default:
       break;
     }
+  } else if (midiEvent.channel == STOP_TAB_CHANNEL) {
+    result.value = midiEvent.note + 8;
+    result.number = STOP_TAB_CHANNEL;
   }
 
   return result;
 }
+
+int lampToInput(int lampChainNumber) {
+  
+}
+
+

@@ -35,15 +35,17 @@
 #define STOP_TAB_CHANNEL 3
 #define CHOIR_CHANNEL 4
 
+#define MIDI_CC_NUM 7
+#define ANALOG_DIFF 10
+
 byte currentInputChain[5][96];
 byte previousInputChain[5][96];
 // 0 = swell, 1 = great, 2 = pedal, 3 = stops, 4 = choir
 
 byte lampChainState[152];
 
-bool receiveMidiLimitBypass;
-
-int previousMicros;
+int previousAnalogInputs[4];
+int currentAnalogInputs[4];
 
 struct midiAddr
 {
@@ -71,62 +73,30 @@ void setup()
   pinMode(O6, OUTPUT);
   pinMode(RECEIVE_MIDI_LIMIT_PIN, INPUT_PULLUP);
   pinMode(POWER_DETECT, INPUT);
-  receiveMidiLimitBypass = true;
 }
 
 void loop()
 {
-  if (true)
+  midiEventPacket_t rx;
+  do
   {
-    midiEventPacket_t rx;
-    do
+    rx = MidiUSB.read();
+    if (rx.header != 0)
     {
-      if (micros() - previousMicros < 10000 || receiveMidiLimitBypass)
-      {
-//        do {
-//          midiEventPacket_t rx;
-//        rx = MidiUSB.read();
-//        if (rx.header != 0) {
-//          //send back the received MIDI command
-//        MidiUSB.sendMIDI(rx);
-//        MidiUSB.flush();
-//      }
-//  } while (rx.header != 0);
-        rx = MidiUSB.read();
-        if (rx.header != 0)
-        {
-          receiveLampMIDI(rx);
-        }
-        else
-        {
-          
-        }
-      }
-      else
-      {
-        break;
-      }
-    } while (rx.header != 0);
+      receiveLampMIDI(rx);
+    }
+  } while (rx.header != 0);
 
-    updateLamps();
-    shiftInputs();
-    handleInputChanges();
-    MidiUSB.flush();
-    previousMicros = micros();
-  }
-  else {
-    midiEventPacket_t rx;
-    do {
-      rx = MidiUSB.read();
-    } while (rx.header != 0);
-    MidiUSB.flush();
-    delay(1000);
-  }
+  updateLamps();
+  shiftInputs();
+  scanAnalogInputs();
+  handleInputChanges();
+  MidiUSB.flush();
 }
 
 void updateLamps()
 {
-  for (int i = 151; i >= 0; i--)
+  for (int i = sizeof(lampChainState) - 1; i >= 0; i--)
   {
     // output chain
     digitalWrite(O6, lampChainState[i]);
@@ -145,6 +115,7 @@ void updateLamps()
 
 void handleInputChanges()
 {
+  // switches
   for (int input_number = 0; input_number < INPUT_CHAIN_SIZE; input_number++)
   {
     for (int chain = 0; chain < 5; chain++)
@@ -165,6 +136,15 @@ void handleInputChanges()
         }
       }
       previousInputChain[chain][input_number] = currentInputChain[chain][input_number];
+    }
+  }
+  // analog inputs
+  for (int i = 0; i < 4; i++) {
+    int diff = currentAnalogInputs[i] - previousAnalogInputs[i];
+    if (diff > ANALOG_DIFF || diff < -ANALOG_DIFF) {
+      // map 0-1023 to 0-127
+      sendCC(i, MIDI_CC_NUM, map(currentAnalogInputs[i], 0, 1023, 0, 127));
+      previousAnalogInputs[i] = currentAnalogInputs[i];
     }
   }
 }
@@ -201,28 +181,12 @@ void shiftInputs()
 void receiveLampMIDI(midiEventPacket_t rx)
 {
   chainAddr chainToChange = midiToChain({rx.byte1 & 0x0F, rx.byte2});
-  lampChainState[chainToChange.value] = (rx.byte1 >> 4) & 0x0F == NOTE_ON;
+  lampChainState[chainToChange.value] = ((rx.byte1 >> 4) & 0x0F) == 0x09;
 
   if (chainToChange.number == STOP_TAB_CHANNEL)
   {
     previousInputChain[STOP_TAB_CHANNEL][chainToChange.value] = rx.byte1 & 0xF0 == NOTE_ON;
   }
-    lampChainState[40] = rx.byte1 & 0x01;
-    lampChainState[41] = rx.byte1 & 0x02;
-    lampChainState[42] = rx.byte1 & 0x04;
-    lampChainState[43] = rx.byte1 & 0x08;
-    lampChainState[46] = rx.byte1 & 0x10;
-    lampChainState[47] = rx.byte1 & 0x20;
-    lampChainState[48] = rx.byte1 & 0x40;
-    lampChainState[49] = rx.byte1 & 0x80;
-    lampChainState[53] = rx.byte2 & 0x01;
-    lampChainState[54] = rx.byte2 & 0x02;
-    lampChainState[55] = rx.byte2 & 0x04;
-    lampChainState[56] = rx.byte2 & 0x08;
-    lampChainState[66] = rx.byte2 & 0x10;
-    lampChainState[67] = rx.byte2 & 0x20;
-    lampChainState[68] = rx.byte2 & 0x40;
-    lampChainState[69] = rx.byte2 & 0x80;
 }
 
 void noteOn(byte channel, byte pitch, byte velocity)
@@ -235,6 +199,10 @@ void noteOff(byte channel, byte pitch, byte velocity)
 {
   midiEventPacket_t noteOff = {0x08, 0x80 | channel, pitch, velocity};
   MidiUSB.sendMIDI(noteOff);
+}
+
+void sendCC(byte channel, byte number, byte value) {
+  MidiUSB.sendMIDI({ 0x0B, 0xB0 | channel, number, value });
 }
 
 midiAddr chainToMidi(chainAddr chain)
@@ -265,24 +233,18 @@ chainAddr midiToChain(midiAddr midiEvent)
   chainAddr result = {-1, -1};
 
   if (midiEvent.channel == SWELL_CHANNEL || midiEvent.channel == GREAT_CHANNEL || midiEvent.channel == CHOIR_CHANNEL)
-  {
-    if (midiEvent.note >= 35 && midiEvent.note <= 95)
-    {
-      return result;
-    }
-
-    result.number = 3;
-
+  {    
+    result.number = STOP_TAB_CHANNEL;
     switch (midiEvent.channel)
     {
     case SWELL_CHANNEL:
       if (midiEvent.note >= 19 && midiEvent.note <= 26)
       {
-        result.value = midiEvent.note + 86;
+        result.value = midiEvent.note + 85;
       }
       else if (midiEvent.note >= 28 && midiEvent.note <= 30)
       {
-        result.value = midiEvent.note + 85;
+        result.value = midiEvent.note + 83;
       }
       else if (midiEvent.note == 98)
       {
@@ -292,33 +254,33 @@ chainAddr midiToChain(midiAddr midiEvent)
     case GREAT_CHANNEL:
       if (midiEvent.note >= 11 && midiEvent.note <= 15)
       {
-        result.value = midiEvent.note + 106;
+        result.value = midiEvent.note + 103;
       }
       else if (midiEvent.note >= 19 && midiEvent.note <= 24)
       {
-        result.value = midiEvent.note + 102;
+        result.value = midiEvent.note + 101;
       }
       else if (midiEvent.note >= 27 && midiEvent.note <= 31)
       {
-        result.value = midiEvent.note + 101;
+        result.value = midiEvent.note + 100;
       }
       break;
     case CHOIR_CHANNEL:
       if (midiEvent.note >= 13 && midiEvent.note <= 14)
       {
-        result.value = midiEvent.note + 120;
+        result.value = midiEvent.note + 119;
       }
       else if (midiEvent.note >= 18 && midiEvent.note <= 23)
       {
-        result.value = midiEvent.note + 117;
+        result.value = midiEvent.note + 116;
       }
       else if (midiEvent.note >= 24 && midiEvent.note <= 27)
       {
-        result.value = midiEvent.note + 120;
+        result.value = midiEvent.note + 119;
       }
       else if (midiEvent.note >= 29 && midiEvent.note <= 32)
       {
-        result.value = midiEvent.note + 119;
+        result.value = midiEvent.note + 118;
       }
       break;
     default:
@@ -332,8 +294,10 @@ chainAddr midiToChain(midiAddr midiEvent)
   return result;
 }
 
-int lampToInput(int lampChainNumber) {
-  
+void scanAnalogInputs() {
+  currentAnalogInputs[0] = analogRead(A0);
+  currentAnalogInputs[1] = analogRead(A1);
+  currentAnalogInputs[2] = analogRead(A2);
+  currentAnalogInputs[3] = analogRead(A3);
 }
-
 

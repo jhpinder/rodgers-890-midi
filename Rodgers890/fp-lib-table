@@ -1,0 +1,4 @@
+(fp_lib_table
+  (version 7)
+  (lib (name "Rogers890Library")(type "KiCad")(uri "${KIPRJMOD}/Rogers890Library.pretty")(options "")(descr ""))
+)

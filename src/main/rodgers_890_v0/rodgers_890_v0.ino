@@ -122,17 +122,25 @@ void handleInputChanges()
     {
       if (currentInputChain[chain][input_number] != previousInputChain[chain][input_number])
       {
-        // input is different than last scan
-        midiAddr midiToSend = chainToMidi({chain, input_number});
-        if (currentInputChain[chain][input_number])
-        {
-          // input turned on, send midi note on
-          noteOn(midiToSend.channel, midiToSend.note, NOTE_ON_VELOCITY);
-        }
-        else
-        {
-          // input turned off, send midi note off
-          noteOff(midiToSend.channel, midiToSend.note, NOTE_OFF_VELOCITY);
+        if (chain == SWELL_CHANNEL && input_number == 95 && currentInputChain[chain][input_number]) {
+          if (lampChainState[141]) {
+            noteOn(SWELL_CHANNEL, 127, 64);
+          } else {
+            noteOn(SWELL_CHANNEL, 99, 64);
+          }
+        } else {
+          // input is different than last scan
+          midiAddr midiToSend = chainToMidi({chain, input_number});
+          if (currentInputChain[chain][input_number])
+          {
+            // input turned on, send midi note on
+            noteOn(midiToSend.channel, midiToSend.note, NOTE_ON_VELOCITY);
+          }
+          else
+          {
+            // input turned off, send midi note off
+            noteOff(midiToSend.channel, midiToSend.note, NOTE_OFF_VELOCITY);
+          }
         }
       }
       previousInputChain[chain][input_number] = currentInputChain[chain][input_number];
@@ -216,8 +224,13 @@ midiAddr chainToMidi(chainAddr chain)
   }
   else if (chain.number == PEDAL_CHANNEL)
   {
-    result.channel = chain.number;
-    result.note = chain.value - 28;
+    if (chain.value == 47) {
+      result.channel = GREAT_CHANNEL;
+      result.note = 19;
+    } else {
+      result.channel = chain.number;
+      result.note = chain.value - 28;
+    }
   }
   else if (chain.number == STOP_TAB_CHANNEL)
   {
@@ -246,7 +259,7 @@ chainAddr midiToChain(midiAddr midiEvent)
       {
         result.value = midiEvent.note + 83;
       }
-      else if (midiEvent.note == 98)
+      else if (midiEvent.note == 99)
       {
         result.value = 141;
       }

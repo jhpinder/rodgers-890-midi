@@ -47,6 +47,8 @@ byte lampChainState[152];
 int previousAnalogInputs[4];
 int currentAnalogInputs[4];
 
+long prevMillis = 0;
+
 struct midiAddr
 {
   byte channel;
@@ -73,10 +75,15 @@ void setup()
   pinMode(O6, OUTPUT);
   pinMode(RECEIVE_MIDI_LIMIT_PIN, INPUT_PULLUP);
   pinMode(POWER_DETECT, INPUT);
+
+//  Serial.begin(312500);
 }
 
 void loop()
 {
+  shiftInputs();
+  scanAnalogInputs();
+  
   midiEventPacket_t rx;
   do
   {
@@ -84,12 +91,15 @@ void loop()
     if (rx.header != 0)
     {
       receiveLampMIDI(rx);
+      prevMillis = millis();
     }
   } while (rx.header != 0);
+  
 
-  updateLamps();
-  shiftInputs();
-  scanAnalogInputs();
+  if (millis() - prevMillis > 5) {
+    updateLamps();
+  }
+  
   handleInputChanges();
   MidiUSB.flush();
 }
@@ -105,9 +115,9 @@ void updateLamps()
     digitalWrite(OCLK, HIGH);
     delayMicroseconds(OCLK_DELAY);
     digitalWrite(OCLK, LOW);
+    delayMicroseconds(OCLK_DELAY);
   }
   // strobe
-  delayMicroseconds(OCLK_DELAY);
   digitalWrite(OSTB, HIGH);
   delayMicroseconds(OSTB_DELAY);
   digitalWrite(OSTB, LOW);
@@ -193,7 +203,7 @@ void receiveLampMIDI(midiEventPacket_t rx)
 
   if (chainToChange.number == STOP_TAB_CHANNEL)
   {
-    previousInputChain[STOP_TAB_CHANNEL][chainToChange.value] = rx.byte1 & 0xF0 == NOTE_ON;
+    previousInputChain[STOP_TAB_CHANNEL][chainToChange.value] = ((rx.byte1 >> 4) & 0x0F) == 0x09;
   }
 }
 

@@ -1,3 +1,5 @@
+// rodgers_890_v0 — Rodgers 890 console firmware, release v0.2
+// Release builds: see ../release/platformio.ini (Leonardo env + USB name).
 #include <MIDIUSB.h>
 
 #define POWER_DETECT 2
@@ -38,9 +40,93 @@
 #define MIDI_CC_NUM 7
 #define ANALOG_DIFF 10
 
+// The CPU-board edge connector brings out four ADC inputs (AD0-AD3, shared
+// 870B/890/900B design), but the 890 pedal assembly wires only three pots:
+// Swell, Great, Crescendo. AD3 is the spare Choir-expression channel --
+// unwired on this console it floats and spams CC7 on MIDI ch 4 (1-based).
+// Shoes therefore emit CC7 on ch0-2 only. To reuse the spare (e.g. aux
+// input), bump ANALOG_INPUT_COUNT back to 4 and re-add the analogRead(A3).
+#define ANALOG_INPUT_COUNT 3
+
 #define MIDI_ADDR_NONE 0xFF      // midiToChain() "no mapping" sentinel
 #define MIDI_IDLE_MS 5           // ms of MIDI-in silence before strobing lamps
 #define LAMP_STROBE_INTERVAL 250 // ms: force a lamp re-strobe even mid-burst
+
+// --- Crescendo bar + tutti indicator -------------------------------------------
+// Lamp bits 0-7 are the crescendo indicator board (6112-719, a 12-element LED
+// array: 8 green crescendo + 4 red tutti segments) sitting at the head of the
+// lamp chain -- that is exactly why the drawknob map starts at +8. Confirmed
+// by the factory OUTPUT CHAIN(6) LAMPS listing (service manual, Data Chains
+// section) -- each bit drives a GROUP of segments:
+//   bit0->seg1,2   bit1->seg1-3   bit2->seg1-4   bit3->seg5
+//   bit4->seg5,6   bit5->seg5-7   bit6->seg5-8   bit7->all 4 red tutti segments
+// So a level is a bitmask pattern, not a per-segment thermometer, and the
+// clean fills reachable are 0,2,3,4,5,6,7,8 (no single-segment state).
+//
+// By design the bar is HOST-driven: the Leonardo never reads the crescendo
+// shoe ADC for it (the OEM CPU did -- AD0-3 are labeled "Crescendo-expression
+// inputs" on schematic 1779 -- we forward the shoe as a raw CC and the host
+// owns the level). Inbound:
+//   - crescendo: CC CRESCENDO_CC_NUM on CRESCENDO_CHANNEL, value 0-127 ->
+//     segments lit via crescBarPattern[].
+//   - tutti: Note On/Off (TUTTI_CHANNEL, TUTTI_NOTE) -> lampChainState[7],
+//     just like a piston lamp. Default = the tutti piston's own note, so the
+//     normal piston-lamp echo drives it with no host-side special-casing.
+// TODO(bench): listing is confirmed for the 890 -- still verify segment order
+// on this console (bit order vs physical bar direction).
+#define CRESCENDO_CHANNEL 5 // unused channel; shoes emit CC7 on ch0-2
+#define CRESCENDO_CC_NUM 20
+#define TUTTI_CHANNEL GREAT_CHANNEL
+#define TUTTI_NOTE 30 // adjust to the learned tutti piston note
+
+// Index = number of bar segments lit (0-8); value = lamp bits 0-6 pattern.
+// A 1-segment fill isn't displayable -- it shows segments 1,2 anyway.
+const byte crescBarPattern[9] = {
+  0x00, // 0
+  0x01, // 1 (falls through to 2-segment display)
+  0x01, // 2: bit0 -> seg 1,2
+  0x02, // 3: bit1 -> seg 1,2,3
+  0x04, // 4: bit2 -> seg 1-4
+  0x0C, // 5: bit2+3 -> seg 1-5
+  0x14, // 6: bit2+4 -> seg 1-6
+  0x24, // 7: bit2+5 -> seg 1-7
+  0x44, // 8: bit2+6 -> seg 1-8 (full)
+};
+#define TUTTI_LAMP 7 // drives all four red segments
+
+// --- Power keep-alive (output chain 5, "power supply control") ----------------
+// Uncomment POWER_KEEPALIVE only when the S5 driver bodge is wired (parts and
+// wiring in docs/power-keepalive.md): spare GPIO -> ~1k -> 2N7000 gate (or
+// 2N3904 + 4.7k base resistor), drain/collector -> TP30 (S5), source/emitter
+// -> GND (TP48), and a 2.2k pullup TP46 (+12V) -> TP30.
+//
+// OCLK/OSTB are shared by every output chain, so chain-5 data can ONLY be
+// shifted on the same clock edges as the lamp frame -- a dedicated S5-only
+// strobe would latch zeros into the lamp chain. updateLamps() therefore
+// shifts one 160-bit frame (890 OUTPUT CHAIN(5) listing): all zeros = every
+// chain-5 device off, except bit ~66 -- "power supply control" (PS), driving
+// the airsound-board transistor that feeds the PSU keep-alive pump -- which
+// toggles every strobe. If firmware hangs, strobes stop, the pump dies, and
+// the organ powers down: the OEM watchdog behavior is preserved.
+//
+// The driver inverts: pin HIGH sinks the line = data 0 on the wire, pin LOW
+// lets the pullup raise it = data 1.
+//
+// Bit 66 is from OCR of the chain listing (could be +/-1); verify which
+// transistor actually toggles at pad PS on the bench before relying on it.
+// S5_FRAME_BITS only has to be >= the physical chain length: positions are
+// set by the LAST bits shifted, so extra leading zeros just fall off the far
+// end. CAUTION: "all zeros" semantics (stops/mutes/keyers off, expression
+// DACs zeroed) are inferred from the listing -- bench-verify before amps.
+//#define POWER_KEEPALIVE
+#define S5_PIN A4         // deadbug driver gate/base
+#define S5_FRAME_BITS 160 // 890 OUTPUT CHAIN(5) listing
+#define S5_POWER_BIT 66   // "power supply control" (PS), trem block
+#define S5_STROBE_MS 8    // keep-alive cadence -> ~60 Hz square wave on bit 66
+
+#ifdef POWER_KEEPALIVE
+bool s5PowerBit = false; // toggled once per output strobe -> AC on bit 66
+#endif
 
 byte currentInputChain[5][96];
 byte previousInputChain[5][96];
@@ -48,8 +134,8 @@ byte previousInputChain[5][96];
 
 byte lampChainState[152];
 
-int previousAnalogInputs[4];
-int currentAnalogInputs[4];
+int previousAnalogInputs[ANALOG_INPUT_COUNT];
+int currentAnalogInputs[ANALOG_INPUT_COUNT];
 
 unsigned long prevMillis = 0;       // last time an inbound MIDI packet was seen
 unsigned long lastLampStrobeMs = 0; // last time updateLamps() strobed the chain
@@ -81,6 +167,9 @@ void setup()
   pinMode(OCLK, OUTPUT);
   pinMode(OSTB, OUTPUT);
   pinMode(O6, OUTPUT);
+#ifdef POWER_KEEPALIVE
+  pinMode(S5_PIN, OUTPUT);
+#endif
   pinMode(RECEIVE_MIDI_LIMIT_PIN, INPUT_PULLUP);
   pinMode(POWER_DETECT, INPUT);
 
@@ -94,8 +183,17 @@ void loop()
 
   pumpMidi();
 
+#ifdef POWER_KEEPALIVE
+  // The keep-alive pump needs continuous edges, not just lamp updates: force
+  // a re-strobe on its own cadence even while inbound MIDI keeps prevMillis
+  // fresh and suppresses the idle path.
+  const bool keepAliveDue = millis() - lastLampStrobeMs > S5_STROBE_MS;
+#else
+  const bool keepAliveDue = false;
+#endif
   if (millis() - prevMillis > MIDI_IDLE_MS ||
-      millis() - lastLampStrobeMs > LAMP_STROBE_INTERVAL)
+      millis() - lastLampStrobeMs > LAMP_STROBE_INTERVAL ||
+      keepAliveDue)
   {
     updateLamps();
   }
@@ -128,10 +226,31 @@ void updateLamps()
   byte lamps[sizeof(lampChainState)];
   memcpy(lamps, lampChainState, sizeof(lampChainState));
 
-  for (int i = sizeof(lamps) - 1; i >= 0; i--)
+#ifdef POWER_KEEPALIVE
+  // Chain 5 wants all zeros except the toggling power bit, and its data rides
+  // the same OCLK edges as the lamps: hold the wire at data-0 (pin HIGH) for
+  // every position except index 66 -- two extra digitalWrite()s per frame.
+  s5PowerBit = !s5PowerBit;
+  digitalWrite(S5_PIN, HIGH);
+  const int frameBits = S5_FRAME_BITS;
+#else
+  const int frameBits = sizeof(lamps);
+#endif
+
+  for (int i = frameBits - 1; i >= 0; i--)
   {
     // output chain
-    digitalWrite(O6, lamps[i]);
+    digitalWrite(O6, i < (int)sizeof(lamps) ? lamps[i] : LOW);
+#ifdef POWER_KEEPALIVE
+    if (i == S5_POWER_BIT)
+    {
+      digitalWrite(S5_PIN, s5PowerBit ? LOW : HIGH); // wire = bit 66 value
+    }
+    else if (i == S5_POWER_BIT - 1)
+    {
+      digitalWrite(S5_PIN, HIGH); // back to data-0 for the rest of the frame
+    }
+#endif
     // clock
     delayMicroseconds(OCLK_DELAY);
     digitalWrite(OCLK, HIGH);
@@ -192,7 +311,7 @@ void handleInputChanges()
     }
   }
   // analog inputs
-  for (int i = 0; i < 4; i++)
+  for (int i = 0; i < ANALOG_INPUT_COUNT; i++)
   {
     int diff = currentAnalogInputs[i] - previousAnalogInputs[i];
     if (diff > ANALOG_DIFF || diff < -ANALOG_DIFF)
@@ -261,6 +380,21 @@ void shiftInputs()
 void handleMidiPacket(midiEventPacket_t rx)
 {
   byte status = rx.byte1 & 0xF0;
+  byte channel = rx.byte1 & 0x0F;
+
+  // Crescendo bar: a CC whose value sets the segment count via the factory
+  // group pattern. Only writes lamp bits 0-6 -- bit 7 (tutti) stays untouched.
+  if (status == 0xB0 && channel == CRESCENDO_CHANNEL && rx.byte2 == CRESCENDO_CC_NUM)
+  {
+    byte segmentsLit = ((unsigned int)rx.byte3 * 8) / 127;
+    byte pattern = crescBarPattern[segmentsLit];
+    for (byte i = 0; i < 7; i++)
+    {
+      lampChainState[i] = (pattern >> i) & 1;
+    }
+    return;
+  }
+
   if (status != NOTE_ON && status != NOTE_OFF)
   {
     return;
@@ -269,7 +403,14 @@ void handleMidiPacket(midiEventPacket_t rx)
   // Note On with velocity 0 is a Note Off.
   bool stopOn = (status == NOTE_ON) && (rx.byte3 != 0);
 
-  chainAddr chainToChange = midiToChain({rx.byte1 & 0x0F, rx.byte2});
+  // Tutti: one lamp bit drives all four red segments. Falls through so the
+  // note's own lamp (if midiToChain maps one) still gets written too.
+  if (channel == TUTTI_CHANNEL && rx.byte2 == TUTTI_NOTE)
+  {
+    lampChainState[TUTTI_LAMP] = stopOn;
+  }
+
+  chainAddr chainToChange = midiToChain({channel, rx.byte2});
   if (chainToChange.number == MIDI_ADDR_NONE ||
       chainToChange.value >= sizeof(lampChainState))
   {
@@ -407,6 +548,6 @@ void scanAnalogInputs()
   pumpMidi();
   currentAnalogInputs[2] = analogRead(A2);
   pumpMidi();
-  currentAnalogInputs[3] = analogRead(A3);
-  pumpMidi();
+  // A3 (AD3 edge finger 22) is the spare Choir-expression input -- unwired
+  // on the 890, so it is neither read nor reported.
 }

@@ -1,4 +1,4 @@
-// rodgers_890_v0 — Rodgers 890 console firmware, release v0.2
+// rodgers_890_v0 — Rodgers 890 console firmware, release v0.3
 // Release builds: see ../release/platformio.ini (Leonardo env + USB name).
 #include <MIDIUSB.h>
 
@@ -69,15 +69,23 @@
 // owns the level). Inbound:
 //   - crescendo: CC CRESCENDO_CC_NUM on CRESCENDO_CHANNEL, value 0-127 ->
 //     segments lit via crescBarPattern[].
-//   - tutti: Note On/Off (TUTTI_CHANNEL, TUTTI_NOTE) -> lampChainState[7],
-//     just like a piston lamp. Default = the tutti piston's own note, so the
-//     normal piston-lamp echo drives it with no host-side special-casing.
+//   - tutti: Note On/Off (TUTTI_CHANNEL, TUTTI_NOTE) -> lampChainState[7].
+//     The tutti piston has no lamp of its own -- the 4 red segments ARE its
+//     indicator -- so the echo note is consumed and never hits midiToChain.
 // TODO(bench): listing is confirmed for the 890 -- still verify segment order
 // on this console (bit order vs physical bar direction).
 #define CRESCENDO_CHANNEL 5 // unused channel; shoes emit CC7 on ch0-2
 #define CRESCENDO_CC_NUM 20
 #define TUTTI_CHANNEL GREAT_CHANNEL
-#define TUTTI_NOTE 30 // adjust to the learned tutti piston note
+#define TUTTI_NOTE 35 // measured from the console: 91 23 40 on the wire
+#define SET_CHANNEL GREAT_CHANNEL
+#define SET_NOTE 27 // set keeps Note Off: it is held while capturing
+
+// Piston/toe-stud contacts occupy the low bits of each input chain and are
+// all momentary: they emit Note On on press and nothing on release. Chain 3
+// (latching drawknobs) and key/pedal-note bits are unaffected.
+#define MANUAL_PISTON_BITS 32 // bits 0-31 -> notes 4-35 on chains 0,1,4
+#define PEDAL_PISTON_BITS 64  // bits 0-63 -> toe studs on chain 2
 
 // Index = number of bar segments lit (0-8); value = lamp bits 0-6 pattern.
 // A 1-segment fill isn't displayable -- it shows segments 1,2 anyway.
@@ -300,9 +308,13 @@ void handleInputChanges()
             // input turned on, send midi note on
             noteOn(midiToSend.channel, midiToSend.note, NOTE_ON_VELOCITY);
           }
-          else
+          else if (chain == STOP_TAB_CHANNEL ||
+                   input_number >= (chain == PEDAL_CHANNEL ? PEDAL_PISTON_BITS : MANUAL_PISTON_BITS) ||
+                   (midiToSend.channel == SET_CHANNEL && midiToSend.note == SET_NOTE))
           {
-            // input turned off, send midi note off
+            // input turned off, send midi note off -- keys, latching tabs,
+            // and the held SET piston all report their release; pistons and
+            // toe studs do not
             noteOff(midiToSend.channel, midiToSend.note, NOTE_OFF_VELOCITY);
           }
         }
@@ -403,11 +415,13 @@ void handleMidiPacket(midiEventPacket_t rx)
   // Note On with velocity 0 is a Note Off.
   bool stopOn = (status == NOTE_ON) && (rx.byte3 != 0);
 
-  // Tutti: one lamp bit drives all four red segments. Falls through so the
-  // note's own lamp (if midiToChain maps one) still gets written too.
+  // Tutti: one lamp bit drives all four red segments -- the piston has no
+  // lamp of its own, so the note is consumed here and never falls through
+  // to midiToChain (an earlier default collided with General 8's lamp).
   if (channel == TUTTI_CHANNEL && rx.byte2 == TUTTI_NOTE)
   {
     lampChainState[TUTTI_LAMP] = stopOn;
+    return;
   }
 
   chainAddr chainToChange = midiToChain({channel, rx.byte2});
